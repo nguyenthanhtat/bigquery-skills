@@ -1,0 +1,19 @@
+{
+  "name": "bigquery-skills",
+  "owner": {
+    "name": "Nguyen Thanh Tat",
+    "email": "dev@lastclarity.com"
+  },
+  "metadata": {
+    "description": "Claude Code skills for Google BigQuery",
+    "version": "2.0.0"
+  },
+  "plugins": [
+    {
+      "name": "bigquery-skills",
+      "source": "./",
+      "description": "Google BigQuery skill suite: query optimization, data loading, BigQuery ML, scheduled queries, cost monitoring, security, schema design, and troubleshooting",
+      "version": "2.0.0"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "bigquery-skills",
+  "version": "2.0.0",
+  "description": "Google BigQuery skill suite: query optimization, data loading, BigQuery ML, scheduled queries, cost monitoring, security, schema design, and troubleshooting",
+  "author": {
+    "name": "Nguyen Thanh Tat",
+    "email": "dev@lastclarity.com"
+  },
+  "repository": "https://github.com/nguyenthanhtat/bigquery-skills",
+  "license": "MIT",
+  "keywords": ["bigquery", "gcp", "sql", "data-engineering", "bqml"],
+  "skills": ["./skills/"]
+}
