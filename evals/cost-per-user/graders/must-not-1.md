@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: 'POW\\(\\s*10\\s*,\\s*12\\s*\\)|1e12|1000000000000'
+pattern: 'POW\(\s*10\s*,\s*12\s*\)|1e12|1000000000000'
 flags: i
 match: not_contains
 ---

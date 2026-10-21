@@ -31,7 +31,7 @@ Partition when the table is large (rule of thumb: >10 GB) and queries filter by 
 | Ingestion time | No reliable timestamp | `PARTITION BY _PARTITIONDATE` or `TIMESTAMP_TRUNC(_PARTITIONTIME, DAY)` |
 | Integer range | Partition by an integer key | `PARTITION BY RANGE_BUCKET(customer_id, GENERATE_ARRAY(0, 1000000, 10000))` |
 
-- Limit: **10,000 partitions per table**. Daily partitions ≈ 27 years. If partitions would average <1 GB, prefer coarser granularity (MONTH/YEAR) plus clustering on the date.
+- Limits: **10,000 partitions per table** (daily ≈ 27 years); a single job can modify at most **4,000 partitions** — split large backfills by date range. If partitions would average <1 GB, prefer coarser granularity (MONTH/YEAR) plus clustering on the date.
 - `require_partition_filter = TRUE` on large tables blocks accidental full scans (queries without a filter on the partition column fail).
 - Pruning only works when the filter is on the partition column in a form BigQuery can use: `WHERE DATE(event_ts) BETWEEN ...` on a `DATE(event_ts)` partition is fine; wrapping the column in other functions (`FORMAT_TIMESTAMP`, `CAST(... AS STRING)`) or comparing to a subquery result may prevent it. Verify with a dry run: bytes should drop.
 - Ingestion-time partitioned tables **cannot be created with CTAS**. Create the empty table with DDL, then INSERT.
@@ -114,7 +114,7 @@ OPTIONS (require_partition_filter = TRUE)
 AS SELECT * FROM mydataset.events;
 ```
 3. Verify: row counts (overall and per day), a few checksums/aggregates match.
-4. Pause or redirect writers (scheduled queries, loads, streams), copy any rows written meanwhile.
+4. Pause or redirect writers (scheduled queries, loads, streams), copy any rows written meanwhile. A table with rows still in the legacy streaming buffer can't be renamed — wait for the buffer to flush (`bq show` → no `streamingBuffer`).
 5. Swap names in a quiet window:
 ```sql
 ALTER TABLE mydataset.events RENAME TO events_old;

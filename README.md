@@ -15,6 +15,8 @@ Areas: cost · performance · schema & storage · security · reliability.
 
 The audit never changes anything. Fixes that write, rewrite, delete, or change access are marked *requires approval*.
 
+**Check your setup** at any time: `bash scripts/bq-preflight.sh [--project PROJECT]`. The plugin runs the same check automatically before any of its skills loads, and tells you exactly what to install, log in to, or ask your admin for.
+
 **You need:** the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud`, `bq`), Python 3, and `gcloud auth login`. Roles on the project: `roles/bigquery.resourceViewer`, `roles/bigquery.metadataViewer`, `roles/bigquery.jobUser`; optionally `roles/iam.securityReviewer` for IAM checks. Missing roles skip the matching checks; the report says which.
 
 ## Install

@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: 'model_type\\s*=\\s*.BOOSTED_TREE.(?!_)'
+pattern: 'model_type\s*=\s*["'']BOOSTED_TREE["'']'
 flags: i
 match: not_contains
 ---
