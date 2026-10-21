@@ -1,7 +1,7 @@
 {
   "name": "bigquery-skills",
-  "version": "2.0.0",
-  "description": "Google BigQuery skill suite: query optimization, data loading, BigQuery ML, scheduled queries, cost monitoring, security, schema design, and troubleshooting",
+  "version": "3.0.0",
+  "description": "Read-only BigQuery health audit (cost, performance, schema, security, reliability) with scored findings and fixes, plus BigQuery how-to skills",
   "author": {
     "name": "Nguyen Thanh Tat",
     "email": "dev@lastclarity.com"

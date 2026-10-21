@@ -1,6 +1,21 @@
 # bigquery-skills
 
-Claude Code plugin with skills for Google BigQuery (Standard SQL).
+Claude Code plugin that audits your Google BigQuery project and tells you what to fix — plus how-to skills for day-to-day BigQuery work.
+
+## Audit your BigQuery project
+
+Ask Claude: *"Audit my BigQuery project `my-project` in `US`"* (or `/bigquery-skills:bq-audit`).
+
+1. **Plan** — dry-runs the collectors and shows what the audit will cost (usually cents). Nothing runs until you say yes.
+2. **Collect** — read-only `INFORMATION_SCHEMA` queries plus `bq show` / `bq ls` / `gcloud get-iam-policy`, each capped with `--maximum_bytes_billed` and labelled `tool=bq-audit`.
+3. **Analyze** — `analyze.py` computes metrics and candidate findings deterministically; analyst agents confirm them, find root causes and write fixes.
+4. **Report** — `bq-audit-<project>-<date>/REPORT.md` and `findings.json`: health score per area, evidence, fix steps, risk, estimated monthly impact.
+
+Areas: cost · performance · schema & storage · security · reliability.
+
+The audit never changes anything. Fixes that write, rewrite, delete, or change access are marked *requires approval*.
+
+**You need:** the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud`, `bq`), Python 3, and `gcloud auth login`. Roles on the project: `roles/bigquery.resourceViewer`, `roles/bigquery.metadataViewer`, `roles/bigquery.jobUser`; optionally `roles/iam.securityReviewer` for IAM checks. Missing roles skip the matching checks; the report says which.
 
 ## Install
 
@@ -18,8 +33,11 @@ claude --plugin-dir /path/to/bigquery-skills
 
 ## Skills
 
+## How-to skills
+
 | Skill | Use for |
 |---|---|
+| `bq-audit` | Read-only health audit of a whole project (see above) |
 | `bigquery` | Overview and routing when the task spans several areas |
 | `bigquery-query-optimization` | Slow/expensive queries, JOIN duplication, bytes processed |
 | `bigquery-data-loading` | Load/export CSV, JSON, Parquet…, streaming, federated queries |

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bq-audit finding (reviewed)",
+  "type": "object",
+  "required": ["id", "area", "severity", "title", "evidence", "root_cause", "recommendation", "fix", "confidence"],
+  "properties": {
+    "id": {"type": "string", "description": "Keep the candidate id, e.g. COS-C2-01; new findings use <AREA>-X-NN"},
+    "area": {"enum": ["cost", "performance", "schema", "security", "reliability"]},
+    "severity": {"enum": ["critical", "high", "medium", "low", "info"]},
+    "title": {"type": "string", "maxLength": 120},
+    "evidence": {"type": "object", "description": "Numbers and identifiers copied from analysis/*.json — never invented"},
+    "root_cause": {"type": "string"},
+    "recommendation": {"type": "string"},
+    "fix": {
+      "type": "object",
+      "required": ["steps", "risk", "requires_approval"],
+      "properties": {
+        "steps": {"type": "array", "items": {"type": "string"}, "description": "Ordered SQL / bq / gcloud commands with real names filled in"},
+        "verify": {"type": "string", "description": "How to confirm the fix worked (a query or metric)"},
+        "risk": {"type": "string", "description": "What can break and how to roll back"},
+        "requires_approval": {"type": "boolean", "description": "true for anything that writes, rewrites, deletes or changes access"}
+      }
+    },
+    "est_monthly_savings_usd": {"type": ["number", "null"]},
+    "effort": {"enum": ["S", "M", "L"]},
+    "confidence": {"enum": ["high", "medium", "low"]},
+    "status": {"enum": ["confirmed", "adjusted", "new"]}
+  }
+}

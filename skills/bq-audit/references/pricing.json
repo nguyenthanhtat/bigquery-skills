@@ -1,0 +1,11 @@
+{
+  "_note": "US multi-region list prices in USD. Other regions differ; pass --pricing with your own file. Verify at https://cloud.google.com/bigquery/pricing",
+  "on_demand_per_tib": 6.25,
+  "logical_active_per_gib": 0.02,
+  "logical_longterm_per_gib": 0.01,
+  "physical_active_per_gib": 0.04,
+  "physical_longterm_per_gib": 0.02,
+  "editions_standard_per_slot_hour": 0.04,
+  "editions_enterprise_per_slot_hour": 0.06,
+  "editions_enterprise_plus_per_slot_hour": 0.10
+}
