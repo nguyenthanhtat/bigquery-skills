@@ -1,379 +1,143 @@
 ---
 name: bigquery-schema-design
-description: "Design BigQuery table schemas: partitioning (date, ingestion, integer range), clustering column order, nested/repeated fields, denormalization, data types. Use when the user is creating or restructuring a BigQuery table, or asks about partitioning or clustering."
+description: "Design and change Google BigQuery tables: partitioning (time, ingestion-time, integer range), clustering, data types, nested/repeated fields, schema changes, retention and expiration of old data, and safely repartitioning or reclustering an existing table. Use when the user creates or restructures a BigQuery table, asks how to partition or cluster, wants old data deleted automatically, or needs to change a column or schema."
 ---
 
-# BigQuery Schema Design
+# BigQuery schema design
 
-**Parent Skill:** `/bigquery`  
-**Path:** `/bigquery/schema-design`
+Answer in the user's language. When the problem is project-wide (many tables unpartitioned, storage cost) → suggest the bq-audit skill.
 
-## Purpose
-Design optimal table schemas with partitioning, clustering, and data types for performance and cost efficiency.
+## Safety
+- Dry-run before running anything that scans data: `bq query --dry_run --use_legacy_sql=false '...'`, and run with `--maximum_bytes_billed`.
+- Never run or recommend as a first step: `CREATE OR REPLACE` on an existing table, `DROP`, `TRUNCATE`, unbounded `DELETE`/`UPDATE`, or IAM changes. Write to a new table, verify, then swap — and ask the user first.
+- Use the user's real project/dataset/table names; ask for project and location if a command needs them.
 
-## When to Use
-
-**Trigger when:**
-- Keywords: CREATE TABLE, partition, cluster, schema, design, structure
-- User asks: "how to structure table", "setup partitioning", "optimize storage"
-
-**Chat commands:**
-```bash
-/bigquery/schema-design create events table with partitioning
-/bigquery/schema-design add clustering to existing table
-/bigquery/schema-design design schema for time-series data
+## First, establish
+1. **How the table is queried**: which column nearly every query filters on (usually a date/timestamp), and which columns are filtered/joined next.
+2. **Size and growth**: GB/day, total size, retention needed.
+3. **Write pattern**: append-only, daily partition overwrite, upserts (MERGE), streaming.
+4. Inspect what exists before changing it:
+```sql
+SELECT ddl FROM mydataset.INFORMATION_SCHEMA.TABLES WHERE table_name = 'events';
+SELECT * FROM mydataset.INFORMATION_SCHEMA.TABLE_OPTIONS WHERE table_name = 'events';
 ```
 
-## Requirements
+## Partitioning
+Partition when the table is large (rule of thumb: >10 GB) and queries filter by one column.
 
-<critical>
-- Dataset created
-- Understanding of query patterns
-- Knowledge of data access patterns
-</critical>
+| Type | When | DDL |
+|---|---|---|
+| Time-unit column | Event/business timestamp exists | `PARTITION BY DATE(event_ts)` or `TIMESTAMP_TRUNC(event_ts, HOUR)` / `DATE_TRUNC(d, MONTH)` |
+| Ingestion time | No reliable timestamp | `PARTITION BY _PARTITIONDATE` or `TIMESTAMP_TRUNC(_PARTITIONTIME, DAY)` |
+| Integer range | Partition by an integer key | `PARTITION BY RANGE_BUCKET(customer_id, GENERATE_ARRAY(0, 1000000, 10000))` |
 
----
-
-## Partitioning Strategies
-
-### 1. Date/Timestamp Partitioning (Most Common)
+- Limit: **10,000 partitions per table**. Daily partitions ≈ 27 years. If partitions would average <1 GB, prefer coarser granularity (MONTH/YEAR) plus clustering on the date.
+- `require_partition_filter = TRUE` on large tables blocks accidental full scans (queries without a filter on the partition column fail).
+- Pruning only works when the filter is on the partition column in a form BigQuery can use: `WHERE DATE(event_ts) BETWEEN ...` on a `DATE(event_ts)` partition is fine; wrapping the column in other functions (`FORMAT_TIMESTAMP`, `CAST(... AS STRING)`) or comparing to a subquery result may prevent it. Verify with a dry run: bytes should drop.
+- Ingestion-time partitioned tables **cannot be created with CTAS**. Create the empty table with DDL, then INSERT.
 
 ```sql
--- Daily partitions (recommended for event data)
-CREATE OR REPLACE TABLE `dataset.events`
-PARTITION BY DATE(timestamp)
-OPTIONS (
-  partition_expiration_days = 365,  -- Auto-delete after 1 year
-  require_partition_filter = TRUE   -- Force users to filter by date
-) AS
-SELECT
-  timestamp,
-  user_id,
-  event_name,
-  properties
-FROM `dataset.raw_events`;
+CREATE TABLE mydataset.events (
+  event_id STRING NOT NULL,
+  event_ts TIMESTAMP NOT NULL,
+  event_name STRING,
+  user_id STRING,
+  params JSON
+)
+PARTITION BY DATE(event_ts)
+CLUSTER BY event_name, user_id
+OPTIONS (require_partition_filter = TRUE);
 ```
-
-**When to use:**
-- Event/log data
-- Time-series data
-- Data queried by date ranges
-
-### 2. Integer Range Partitioning
-
-```sql
--- Partition by user ID ranges
-CREATE OR REPLACE TABLE `dataset.users`
-PARTITION BY RANGE_BUCKET(user_id, GENERATE_ARRAY(0, 1000000, 10000))
-AS
-SELECT * FROM `dataset.raw_users`;
-```
-
-**When to use:**
-- Queries filter by numeric ranges
-- Data evenly distributed across ranges
-
-### 3. Ingestion Time Partitioning
-
-```sql
-CREATE OR REPLACE TABLE `dataset.events`
-PARTITION BY _PARTITIONTIME
-AS SELECT * FROM `dataset.raw_events`;
-```
-
----
 
 ## Clustering
-
-### Single Column Clustering
-
-```sql
-CREATE OR REPLACE TABLE `dataset.events`
-PARTITION BY DATE(timestamp)
-CLUSTER BY user_id
-AS SELECT * FROM `dataset.raw_events`;
+- Up to **4 columns**, top-level, non-repeated. Order by how often they are filtered, most-filtered first. FLOAT64 and JSON columns can't be clustering columns.
+- Good: IDs, event names, status, country. Pointless: columns never filtered on.
+- Works with or without partitioning; on small partitions it can replace partitioning.
+- Change on an existing table:
+```bash
+bq update --clustering_fields=event_name,user_id mydataset.events
 ```
+This applies to data written afterwards; existing data is not reorganized until rewritten. To recluster history, rewrite into a new table (see below).
 
-### Multi-Column Clustering (Order Matters!)
-
+## Types
+- IDs: INT64 if numeric (smaller, faster joins); STRING for UUIDs or IDs with leading zeros/letters.
+- Money: NUMERIC/BIGNUMERIC, never FLOAT64.
+- Time: TIMESTAMP for instants (UTC), DATE for calendar dates, DATETIME only for wall-clock without zone.
+- Semi-structured: JSON type (`PARSE_JSON`, `TO_JSON`, `JSON_VALUE`) or STRUCT/ARRAY when the shape is known. `TO_JSON_STRING` returns STRING, not JSON.
+- Nested/repeated fields avoid joins for 1-to-many data (order → line items):
 ```sql
--- Cluster order: most filtered columns first
-CREATE OR REPLACE TABLE `dataset.events`
-PARTITION BY DATE(timestamp)
-CLUSTER BY tenant_id, user_id, event_name  -- Order by selectivity
-AS SELECT * FROM `dataset.raw_events`;
-```
-
-**Clustering Rules:**
-- Max 4 clustering columns
-- Order by most selective first
-- Use for high-cardinality columns
-- Best for columns in WHERE/GROUP BY
-
----
-
-## Data Types Best Practices
-
-### Choose Optimal Types
-
-```sql
-CREATE OR REPLACE TABLE `dataset.optimized` AS
-SELECT
-  -- Use STRING for IDs (not INT64)
-  CAST(user_id AS STRING) as user_id,
-  
-  -- Use TIMESTAMP for datetime
-  TIMESTAMP(created_at) as created_at,
-  
-  -- Use NUMERIC for currency (precise decimal)
-  CAST(price AS NUMERIC) as price,
-  
-  -- Use BOOL instead of INT64
-  CAST(is_active AS BOOL) as is_active,
-  
-  -- Use ARRAY for repeating fields
-  ARRAY_AGG(tag) as tags,
-  
-  -- Use JSON for semi-structured data
-  TO_JSON_STRING(metadata) as metadata
-FROM `dataset.raw_data`;
-```
-
-**Type Recommendations:**
-- **IDs:** STRING (avoid INT64 for UUIDs)
-- **Timestamps:** TIMESTAMP (not STRING)
-- **Money:** NUMERIC (exact decimal)
-- **True/False:** BOOL (not INT64)
-- **Lists:** ARRAY (not delimited strings)
-- **Flexible:** JSON
-
----
-
-## Nested and Repeated Fields
-
-### STRUCT (Nested)
-
-```sql
-CREATE OR REPLACE TABLE `dataset.orders` AS
-SELECT
-  order_id,
-  STRUCT(
-    customer_name,
-    customer_email,
-    customer_phone
-  ) as customer,
-  STRUCT(
-    street,
-    city,
-    country
-  ) as shipping_address
-FROM `dataset.raw_orders`;
-
--- Query nested fields
-SELECT
-  order_id,
-  customer.name,
-  shipping_address.city
-FROM `dataset.orders`;
-```
-
-### ARRAY (Repeated)
-
-```sql
-CREATE OR REPLACE TABLE `dataset.users_with_events` AS
-SELECT
-  user_id,
-  ARRAY_AGG(STRUCT(
-    event_name,
-    timestamp,
-    properties
-  ) ORDER BY timestamp DESC LIMIT 100) as recent_events
-FROM `dataset.events`
-GROUP BY user_id;
-
--- Query arrays
-SELECT
-  user_id,
-  event.event_name,
-  event.timestamp
-FROM `dataset.users_with_events`,
-UNNEST(recent_events) as event
-WHERE event.event_name = 'purchase';
-```
-
----
-
-## Schema Evolution
-
-### Add Column
-
-```sql
--- Add nullable column (no rewrite needed)
-ALTER TABLE `dataset.events`
-ADD COLUMN new_field STRING;
-
--- Add required column (requires default)
-ALTER TABLE `dataset.events`
-ADD COLUMN new_required STRING NOT NULL DEFAULT 'default_value';
-```
-
-### Modify Column Type
-
-```sql
--- Cannot change type directly
--- Must create new table
-CREATE OR REPLACE TABLE `dataset.events_v2` AS
-SELECT
-  *,
-  CAST(string_column AS INT64) as string_column_int
-FROM `dataset.events`;
-```
-
----
-
-## Table Design Patterns
-
-### Pattern 1: Event Store (Append-Only)
-
-```sql
-CREATE OR REPLACE TABLE `dataset.events`
-PARTITION BY DATE(timestamp)
-CLUSTER BY tenant_id, user_id
-OPTIONS (
-  partition_expiration_days = 730  -- 2 years
+CREATE TABLE mydataset.orders (
+  order_id STRING NOT NULL,
+  order_date DATE NOT NULL,
+  customer STRUCT<id STRING, name STRING, email STRING>,
+  items ARRAY<STRUCT<sku STRING, qty INT64, price NUMERIC>>
 )
-AS SELECT
-  timestamp,
-  tenant_id,
-  user_id,
-  event_name,
-  TO_JSON_STRING(properties) as properties
-FROM `dataset.raw_events`;
+PARTITION BY order_date
+CLUSTER BY order_id;
+
+-- Build from normalized tables: aggregate with GROUP BY
+SELECT o.order_id, o.order_date,
+       STRUCT(c.id, c.name, c.email) AS customer,
+       ARRAY_AGG(STRUCT(i.sku, i.qty, i.price)) AS items
+FROM mydataset.orders_flat o
+JOIN mydataset.customers c ON c.id = o.customer_id
+JOIN mydataset.order_items i ON i.order_id = o.order_id
+GROUP BY o.order_id, o.order_date, c.id, c.name, c.email;
+
+-- Query: field names must match the STRUCT definition
+SELECT order_id, customer.name, item.sku
+FROM mydataset.orders, UNNEST(items) AS item
+WHERE order_date = '2026-10-20';
 ```
+- Primary/foreign keys can be declared `NOT ENFORCED`; they help the optimizer (join elimination) but don't validate data.
 
-### Pattern 2: Slowly Changing Dimension (SCD Type 2)
+## Schema changes
+| Change | How |
+|---|---|
+| Add NULLABLE column | `ALTER TABLE t ADD COLUMN c STRING` |
+| Add REQUIRED column | Not allowed on existing tables — add NULLABLE, backfill, enforce in pipeline |
+| Relax NOT NULL | `ALTER TABLE t ALTER COLUMN c DROP NOT NULL` |
+| Widen type | `ALTER TABLE t ALTER COLUMN c SET DATA TYPE NUMERIC` (INT64→NUMERIC/BIGNUMERIC/FLOAT64, NUMERIC→BIGNUMERIC/FLOAT64) |
+| Rename / drop column | `ALTER TABLE t RENAME COLUMN a TO b`, `ALTER TABLE t DROP COLUMN c` (dropped column storage is freed after time travel) |
+| Other type change, repartition, recluster history | Rewrite into a new table (below) |
+| Default value | `ALTER TABLE t ALTER COLUMN c SET DEFAULT CURRENT_TIMESTAMP()` |
 
+## Repartition / restructure an existing table safely
+A table can't be partitioned or re-partitioned in place.
+1. Estimate cost: dry-run the SELECT (it scans the whole table).
+2. Create the new table alongside:
 ```sql
-CREATE OR REPLACE TABLE `dataset.users_history` AS
-SELECT
-  user_id,
-  name,
-  email,
-  valid_from,
-  LEAD(valid_from, 1, TIMESTAMP('9999-12-31')) OVER (
-    PARTITION BY user_id ORDER BY valid_from
-  ) as valid_to,
-  is_current
-FROM `dataset.user_changes`;
+CREATE TABLE mydataset.events_new
+PARTITION BY DATE(event_ts)
+CLUSTER BY event_name, user_id
+OPTIONS (require_partition_filter = TRUE)
+AS SELECT * FROM mydataset.events;
 ```
-
-### Pattern 3: Aggregation Table
-
+3. Verify: row counts (overall and per day), a few checksums/aggregates match.
+4. Pause or redirect writers (scheduled queries, loads, streams), copy any rows written meanwhile.
+5. Swap names in a quiet window:
 ```sql
--- Pre-aggregated for fast queries
-CREATE OR REPLACE TABLE `dataset.daily_stats`
-PARTITION BY date
-CLUSTER BY tenant_id
-AS SELECT
-  DATE(timestamp) as date,
-  tenant_id,
-  COUNT(DISTINCT user_id) as unique_users,
-  COUNT(*) as total_events
-FROM `dataset.events`
-GROUP BY date, tenant_id;
+ALTER TABLE mydataset.events RENAME TO events_old;
+ALTER TABLE mydataset.events_new RENAME TO events;
 ```
+Views referencing the table by name keep working; jobs/streams writing by table ID must be checked.
+6. Keep `events_old` for rollback with an expiration: `ALTER TABLE mydataset.events_old SET OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 14 DAY));`
 
----
-
-## Vietnamese Automotive Schema Example
-
+## Retention: deleting old data automatically
+- **Partitioned table** → partition expiration deletes whole partitions older than N days:
 ```sql
--- Car listings table
-CREATE OR REPLACE TABLE `dataset.car_listings`
-PARTITION BY DATE(created_at)
-CLUSTER BY dealership_id, category, city
-OPTIONS (
-  description = 'Danh sách ô tô và xe máy tại Việt Nam',
-  partition_expiration_days = 365
-) AS
-SELECT
-  listing_id,
-  dealership_id,
-  
-  -- Category: 'ô tô', 'xe máy', 'xe tải'
-  category,
-  
-  -- Location (Vietnam cities)
-  city,  -- 'Hồ Chí Minh', 'Hà Nội', 'Đà Nẵng'
-  district,
-  
-  -- Car details
-  STRUCT(
-    make,      -- Toyota, Honda, Mazda
-    model,     -- Vios, City, CX-5
-    year,
-    price,
-    mileage_km,
-    fuel_type, -- 'xăng', 'dầu', 'hybrid', 'điện'
-    transmission  -- 'số sàn', 'số tự động'
-  ) as vehicle_info,
-  
-  -- Contact
-  STRUCT(
-    dealer_name,
-    phone,
-    email
-  ) as contact,
-  
-  -- Timestamps
-  created_at,
-  updated_at
-  
-FROM `dataset.raw_listings`;
+ALTER TABLE mydataset.events SET OPTIONS (partition_expiration_days = 365);
 ```
+Takes effect immediately for existing partitions past the limit — confirm the number and back up first if unsure (snapshot or export).
+- **Not partitioned** → partition it first (above), or a scheduled `DELETE FROM t WHERE event_date < DATE_SUB(CURRENT_DATE(), INTERVAL 365 DAY)` (dry-run; DML on large tables is costly).
+- **`expiration_timestamp` deletes the entire table** at that time — use it only for temp/staging tables, never to trim old rows.
+- Dataset defaults: `default_partition_expiration_days`, `default_table_expiration_days` (scratch datasets).
 
----
+## Recovery and copies
+- Time travel: query or copy the table as of any point in the window (2–7 days, `max_time_travel_hours`, default 7 days): `SELECT * FROM t FOR SYSTEM_TIME AS OF TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)`. A **dropped** table is restored with `bq cp mydataset.t@<epoch_ms> mydataset.t_restored`.
+- Fail-safe: 7 more days after time travel, recoverable only through Google support.
+- Table snapshot (`CREATE SNAPSHOT TABLE ... CLONE t`) = cheap read-only point-in-time copy; table clone (`CREATE TABLE ... CLONE t`) = writable copy billed only for changed data. Use before risky changes.
 
-## Performance Optimization
-
-### Denormalization
-
-```sql
--- Join frequently accessed data
-CREATE OR REPLACE TABLE `dataset.events_denormalized`
-PARTITION BY DATE(timestamp)
-CLUSTER BY tenant_id
-AS
-SELECT
-  e.*,
-  u.email,
-  u.city,
-  u.registration_date
-FROM `dataset.events` e
-LEFT JOIN `dataset.users` u USING (user_id);
-```
-
-### Table Expiration
-
-```sql
-ALTER TABLE `dataset.temp_table`
-SET OPTIONS (
-  expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
-);
-```
-
----
-
-## Quick Reference
-
-| Pattern | Partition By | Cluster By | Use Case |
-|---------|--------------|------------|----------|
-| Events | DATE(timestamp) | tenant_id, user_id | Event tracking |
-| Users | - | user_id | User lookup |
-| Transactions | DATE(created_at) | merchant_id, amount | Financial data |
-| Logs | _PARTITIONTIME | severity, service | System logs |
-| Analytics | DATE | category, region | Aggregated data |
-
-## Version
-- **Version:** 1.0.0
-- **Last Updated:** 2024-02-09
+## Storage billing
+- Logical (default): bills uncompressed bytes; active vs long-term (table/partition unmodified 90 days → ~50% cheaper). Time travel and fail-safe are free.
+- Physical: bills compressed bytes at a higher per-GiB rate, plus time travel and fail-safe. Usually cheaper when compression ratio is high. Set per dataset: `ALTER SCHEMA mydataset SET OPTIONS (storage_billing_model = 'PHYSICAL')`; can't change again for 14 days. Compare with `INFORMATION_SCHEMA.TABLE_STORAGE` before switching.

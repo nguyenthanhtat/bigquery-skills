@@ -1,456 +1,138 @@
 ---
 name: bigquery-scheduled-queries
-description: "Automate recurring BigQuery work with scheduled queries and Data Transfer Service: daily/hourly aggregations, incremental and CDC ETL pipelines, retries, failure notifications. Use when the user wants to schedule, automate, or run a BigQuery query/ETL on a cron."
+description: "Design, create, fix and operate recurring BigQuery jobs: scheduled queries (Data Transfer Service), idempotent daily/hourly aggregations and incremental loads with MERGE or partition overwrite, @run_date/@run_time parameters, backfills and reruns, service-account ownership, failure notifications, plus when to use Dataform or Airflow instead. Use when the user wants to schedule, automate, backfill, rerun, or debug a recurring BigQuery query or SQL pipeline."
 ---
 
-# BigQuery Scheduled Queries
+# BigQuery scheduled queries
 
-**Parent Skill:** `/bigquery`  
-**Path:** `/bigquery/scheduled-queries`
+Answer in the user's language. Use their real project, dataset, table and column names.
 
-## Purpose
-Automate recurring queries, ETL pipelines, and data transformations with scheduled execution.
+## Safety
+- Dry-run before running anything that scans data: `bq query --dry_run --use_legacy_sql=false '...'`, and run with `--maximum_bytes_billed`.
+- Never run or recommend as a first step: `CREATE OR REPLACE` on an existing table, `DROP`, `TRUNCATE`, unbounded `DELETE`/`UPDATE`, or IAM changes. Write to a new table, verify, then swap — and ask the user first.
+- Use the user's real project/dataset/table names; ask for project and location if a command needs them.
 
-## When to Use
+When the problem is project-wide → suggest the bq-audit skill.
 
-**Trigger when:**
-- Keywords: schedule, automate, daily, hourly, ETL, pipeline, cron
-- User wants to: run query daily, automate reports, incremental loads
+## Before creating a schedule, establish
+1. **What it writes**: a new table each run, one partition per run, or rows merged into a table. This decides idempotency (below).
+2. **Location**: the scheduled query runs in the destination dataset's location; source and destination must match.
+3. **Identity**: who it runs as. Prefer a service account (`--service_account_name`); a schedule owned by a person breaks when they leave or lose access. The account needs `roles/bigquery.jobUser` on the project and write access (e.g. `roles/bigquery.dataEditor`) on the destination dataset.
+4. **Frequency and latency of source data**: late-arriving data needs a lookback window, not just "yesterday".
+5. **Prerequisites**: BigQuery Data Transfer API enabled; the creator has `bigquery.transfers.update` and dataset access.
 
-**Chat commands:**
-```bash
-/bigquery/scheduled-queries create daily aggregation at 2am
-/bigquery/scheduled-queries setup hourly event summary
-/bigquery/scheduled-queries automate weekly report
+## Idempotency is the rule
+Scheduled queries are rerun by people (after a failure) and by backfills. Every run for a given `@run_date` must produce the same result. Pick one:
+
+**A. MERGE (recommended for aggregates and upserts)** — the query is DML, so set no destination table:
+```sql
+DECLARE d DATE DEFAULT DATE_SUB(@run_date, INTERVAL 1 DAY);
+
+MERGE `proj.app.daily_stats` T
+USING (
+  SELECT d AS day, event_name, COUNT(*) AS events, COUNT(DISTINCT user_id) AS users
+  FROM `proj.app.events`
+  WHERE event_date = d                      -- partition filter on the source
+  GROUP BY event_name
+) S
+ON T.day = S.day AND T.event_name = S.event_name
+WHEN MATCHED THEN UPDATE SET events = S.events, users = S.users
+WHEN NOT MATCHED THEN INSERT (day, event_name, events, users) VALUES (S.day, S.event_name, S.events, S.users)
+WHEN NOT MATCHED BY SOURCE AND T.day = d THEN DELETE;   -- rows that disappeared from the source for that day
 ```
 
-## Requirements
-
-<critical>
-- BigQuery Data Transfer Service enabled
-- Service account with bigquery.transfers.update permission
-- Target dataset/table permissions
-</critical>
-
----
-
-## Basic Scheduled Query
-
-### Using BigQuery Console
-
-1. Write your query
-2. Click "Schedule" button
-3. Configure:
-   - Name: `daily_user_stats`
-   - Schedule: `every day 02:00`
-   - Destination table: `dataset.daily_stats`
-   - Write preference: `WRITE_TRUNCATE` or `WRITE_APPEND`
-
-### Using bq CLI
-
+**B. Overwrite one partition (fast, simple, for partitioned destinations)** — a SELECT with a destination template and `WRITE_TRUNCATE`; only the targeted partition is replaced:
 ```bash
-bq mk \
-  --transfer_config \
+bq mk --transfer_config \
+  --project_id=proj --location=US \
   --data_source=scheduled_query \
-  --target_dataset=my_dataset \
-  --display_name='Daily User Stats' \
-  --schedule='every day 02:00' \
+  --display_name='daily_stats' \
+  --target_dataset=app \
+  --schedule='every 24 hours' \
+  --service_account_name=pipelines@proj.iam.gserviceaccount.com \
   --params='{
-    "query":"SELECT DATE(timestamp) as date, COUNT(*) as events FROM `project.dataset.events` WHERE DATE(timestamp) = CURRENT_DATE() - 1 GROUP BY date",
-    "destination_table_name_template":"daily_stats",
-    "write_disposition":"WRITE_APPEND"
+    "query": "SELECT @run_date AS day, event_name, COUNT(*) AS events FROM `proj.app.events` WHERE event_date = @run_date GROUP BY event_name",
+    "destination_table_name_template": "daily_stats${run_date}",
+    "write_disposition": "WRITE_TRUNCATE"
   }'
 ```
+`{run_date}` renders as YYYYMMDD; `{run_time|"%Y%m%d"}` formats the run timestamp. For a different day than the run date, keep the query and the partition decorator aligned (both on the same date) — check the template offset syntax in the docs before relying on it, or use pattern A.
 
----
-
-## Common Patterns
-
-### Pattern 1: Daily Aggregation
-
+**C. DELETE + INSERT inside a transaction** (when MERGE is awkward):
 ```sql
--- Scheduled: every day 02:00 UTC
--- Destination: dataset.daily_summary
--- Write: WRITE_APPEND
-
-SELECT
-  CURRENT_DATE() - 1 as date,
-  COUNT(DISTINCT user_id) as active_users,
-  COUNT(*) as total_events,
-  COUNTIF(event_name = 'purchase') as purchases,
-  SUM(IF(event_name = 'purchase', 
-    CAST(JSON_EXTRACT_SCALAR(properties, '$.amount') AS FLOAT64), 
-    0)) as revenue
-FROM `project.dataset.events`
-WHERE DATE(timestamp) = CURRENT_DATE() - 1
-GROUP BY date;
+BEGIN TRANSACTION;
+DELETE FROM `proj.app.daily_stats` WHERE day = DATE_SUB(@run_date, INTERVAL 1 DAY);
+INSERT INTO `proj.app.daily_stats` (day, event_name, events)
+SELECT DATE_SUB(@run_date, INTERVAL 1 DAY), event_name, COUNT(*)
+FROM `proj.app.events` WHERE event_date = DATE_SUB(@run_date, INTERVAL 1 DAY)
+GROUP BY event_name;
+COMMIT TRANSACTION;
 ```
 
-### Pattern 2: Incremental Load (Partition Overwrite)
+Never use plain `WRITE_APPEND` / `INSERT` without one of these — every rerun duplicates rows. Never "INSERT then DELETE from staging" outside a transaction: rows arriving in between are deleted without being copied.
 
-```sql
--- Scheduled: every hour
--- Destination: dataset.hourly_stats$YYYYMMDDHH
--- Write: WRITE_TRUNCATE
+### Parameters, not wall-clock functions
+- `@run_time` (TIMESTAMP) and `@run_date` (DATE) are the *scheduled* time of the run, so reruns and backfills compute the same window. `CURRENT_DATE()` / `CURRENT_TIMESTAMP()` do not.
+- Incremental loads: derive the window from `@run_time` (e.g. `ts >= TIMESTAMP_SUB(@run_time, INTERVAL 1 HOUR) AND ts < @run_time`) plus a lookback for late data, and make the write idempotent (MERGE on a unique key).
+- Multi-statement scripts (`DECLARE`, transactions, several DML statements) are allowed; scripts and DML write through their own statements, so leave the destination table empty.
 
-DECLARE target_hour TIMESTAMP;
-SET target_hour = TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), HOUR) - INTERVAL 1 HOUR;
+## Schedules
+- Syntax: `every 24 hours`, `every 1 hours`, `every day 02:00`, `every mon,tue,wed,thu,fri 08:00`, `1st,15th of month 06:00`, `every 15 minutes`. Minimum interval is 5 minutes.
+- Times are UTC. Convert from the user's timezone and say so.
+- Stagger jobs that touch the same table: concurrent DML on one table can fail with "Could not serialize access … due to concurrent update".
 
-SELECT
-  user_id,
-  COUNT(*) as events,
-  MAX(timestamp) as last_event
-FROM `project.dataset.events`
-WHERE timestamp >= target_hour
-  AND timestamp < target_hour + INTERVAL 1 HOUR
-GROUP BY user_id;
-```
-
-### Pattern 3: Materialized View Refresh
-
-```sql
--- Scheduled: every 30 minutes
--- Destination: dataset.recent_activity
--- Write: WRITE_TRUNCATE
-
-SELECT
-  user_id,
-  COUNT(*) as recent_events,
-  MAX(timestamp) as last_activity
-FROM `project.dataset.events`
-WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)
-GROUP BY user_id;
-```
-
-### Pattern 4: Multi-Tenant Daily Reports
-
-```sql
--- Scheduled: every day 03:00
--- Destination: dataset.tenant_daily_stats
--- Write: WRITE_APPEND
-
-SELECT
-  tenant_id,
-  CURRENT_DATE() - 1 as date,
-  COUNT(DISTINCT user_id) as unique_users,
-  COUNT(*) as events,
-  COUNTIF(event_name = 'conversion') as conversions
-FROM `project.dataset.events`
-WHERE DATE(timestamp) = CURRENT_DATE() - 1
-GROUP BY tenant_id, date;
-```
-
----
-
-## Advanced Patterns
-
-### Pattern 5: Incremental Processing with Watermark
-
-```sql
--- Track last processed timestamp
-CREATE TABLE IF NOT EXISTS `dataset.watermark` (
-  job_name STRING,
-  last_processed TIMESTAMP
-);
-
--- Scheduled query
-DECLARE last_run TIMESTAMP;
-
--- Get last watermark
-SET last_run = (
-  SELECT last_processed 
-  FROM `dataset.watermark` 
-  WHERE job_name = 'event_processing'
-);
-
--- Process new data
-INSERT INTO `dataset.processed_events`
-SELECT *
-FROM `dataset.raw_events`
-WHERE timestamp > COALESCE(last_run, TIMESTAMP('2024-01-01'))
-  AND timestamp <= CURRENT_TIMESTAMP();
-
--- Update watermark
-MERGE `dataset.watermark` T
-USING (SELECT 'event_processing' as job_name, CURRENT_TIMESTAMP() as last_processed) S
-ON T.job_name = S.job_name
-WHEN MATCHED THEN UPDATE SET last_processed = S.last_processed
-WHEN NOT MATCHED THEN INSERT (job_name, last_processed) VALUES (S.job_name, S.last_processed);
-```
-
-### Pattern 6: Conditional Execution
-
-```sql
--- Only run if new data exists
-DECLARE row_count INT64;
-
-SET row_count = (
-  SELECT COUNT(*)
-  FROM `dataset.staging_table`
-  WHERE DATE(created_at) = CURRENT_DATE()
-);
-
-IF row_count > 0 THEN
-  -- Process data
-  INSERT INTO `dataset.final_table`
-  SELECT * FROM `dataset.staging_table`
-  WHERE DATE(created_at) = CURRENT_DATE();
-  
-  -- Clean up staging
-  DELETE FROM `dataset.staging_table`
-  WHERE DATE(created_at) = CURRENT_DATE();
-END IF;
-```
-
----
-
-## Error Handling
-
-### Pattern: Email Notifications
-
+## Operate
 ```bash
-# Configure email on failure
-bq mk \
-  --transfer_config \
-  --notification_pubsub_topic=projects/PROJECT/topics/bq-errors \
-  --schedule='every day 02:00' \
-  ...
+bq ls --transfer_config --transfer_location=US --project_id=proj
+bq show --format=prettyjson --transfer_config projects/PROJECT_NUMBER/locations/us/transferConfigs/CONFIG_ID
+bq ls --transfer_run --run_attempt=LATEST projects/PROJECT_NUMBER/locations/us/transferConfigs/CONFIG_ID
+
+# Change query or schedule
+bq update --transfer_config --params='{"query":"..."}' --schedule='every day 03:00' projects/.../transferConfigs/CONFIG_ID
+# Move ownership to a service account
+bq update --transfer_config --update_credentials \
+  --service_account_name=pipelines@proj.iam.gserviceaccount.com projects/.../transferConfigs/CONFIG_ID
 ```
-
-### Pattern: Retry Logic
-
+- **Reruns and backfills**: there are no automatic retries. Rerun or backfill a range (one run per schedule slot):
+  `bq mk --transfer_run --start_time='2026-10-01T00:00:00Z' --end_time='2026-10-08T00:00:00Z' projects/.../transferConfigs/CONFIG_ID`
+  Only safe when the query is idempotent.
+- **Notifications**: the bq CLI cannot set them. Use the console (Edit → Notification options: email on failure, or a Pub/Sub topic) or the Data Transfer API fields `emailPreferences.enableFailureEmail` / `notificationPubsubTopic`.
+- **Pause**: disable in the console or set `disabled: true` via the API; don't delete a config you might need — export its params first (`bq show --format=prettyjson`).
+- **History and cost** of runs: scheduled jobs have IDs starting `scheduled_query`:
 ```sql
--- Built-in retries (automatic)
--- BigQuery retries up to 3 times on transient errors
-
--- Manual validation
-CREATE OR REPLACE TABLE `dataset.job_status` AS
-SELECT
-  CURRENT_TIMESTAMP() as run_time,
-  (SELECT COUNT(*) FROM `dataset.daily_stats` 
-   WHERE date = CURRENT_DATE() - 1) as rows_inserted,
-  CASE 
-    WHEN rows_inserted > 0 THEN 'SUCCESS'
-    ELSE 'FAILED'
-  END as status;
-```
-
----
-
-## Scheduling Options
-
-### Cron-style Schedule
-
-```bash
-# Every day at 2am UTC
---schedule='every day 02:00'
-
-# Every Monday at 9am
---schedule='every monday 09:00'
-
-# Every 4 hours
---schedule='every 4 hours'
-
-# Every 30 minutes
---schedule='every 30 minutes'
-
-# First day of month
---schedule='1 of month 00:00'
-
-# Complex: Every weekday at 8am and 6pm
---schedule='every weekday 08:00'
---schedule='every weekday 18:00'
-```
-
-### Using Scripting for Complex Schedules
-
-```sql
--- Run different logic based on day of week
-DECLARE day_of_week INT64;
-SET day_of_week = EXTRACT(DAYOFWEEK FROM CURRENT_DATE());
-
-IF day_of_week = 1 THEN  -- Sunday
-  -- Weekly aggregation
-  INSERT INTO `dataset.weekly_stats`
-  SELECT ...;
-ELSE
-  -- Daily aggregation
-  INSERT INTO `dataset.daily_stats`
-  SELECT ...;
-END IF;
-```
-
----
-
-## Monitoring Scheduled Queries
-
-### Check Transfer Run History
-
-```sql
-SELECT
-  run_time,
-  state,
-  error_status.message as error_message
-FROM `region-us`.INFORMATION_SCHEMA.TRANSFER_RUN
-WHERE transfer_config_id = 'your-config-id'
-ORDER BY run_time DESC
-LIMIT 10;
-```
-
-### Query Job History
-
-```sql
-SELECT
-  job_id,
-  creation_time,
-  state,
-  total_bytes_processed,
-  error_result.message as error
+SELECT DATE(creation_time) AS day, COUNT(*) AS runs, COUNTIF(error_result IS NOT NULL) AS failed,
+       SUM(total_bytes_billed) / POW(1024, 4) AS tib_billed,
+       ANY_VALUE(error_result.message) AS sample_error
 FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
-WHERE job_type = 'QUERY'
-  AND creation_time > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR)
-  AND statement_type = 'INSERT'
-ORDER BY creation_time DESC;
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
+  AND job_id LIKE 'scheduled_query%'
+GROUP BY day ORDER BY day DESC;
 ```
 
----
+## Debugging a failing schedule
+1. `bq ls --transfer_run --run_attempt=LATEST <config>` and open the failing run's job: `bq show -j --format=prettyjson JOB_ID` (with `--location`).
+2. Common causes: run-as identity lost access (`accessDenied`), source table renamed/region mismatch (`notFound`), upstream schema change (`invalidQuery`), concurrent DML on the destination, quota/rate limits on frequent writes (403 `rateLimitExceeded`).
+3. Reproduce by running the query manually with `@run_date`/`@run_time` set via `--parameter='run_date:DATE:2026-10-20'`, dry-run first.
+4. After fixing, backfill the missed dates (idempotent queries only).
 
-## Vietnamese Use Case: Daily Car Listings Report
+## Cost
+- Each run is billed like any query: filter on the source's partition column using `@run_date`, select only needed columns, and test the query manually with `--maximum_bytes_billed` before scheduling.
+- A 5-minute schedule runs ~8,600 times a month; even small queries add up (each referenced table is billed at least 10 MiB on-demand). Prefer longer intervals or incremental windows.
 
-```sql
--- Scheduled: every day 01:00 Vietnam time (18:00 UTC previous day)
--- Destination: dataset.daily_car_stats
--- Write: WRITE_APPEND
-
-WITH daily_listings AS (
-  SELECT
-    DATE(created_at, 'Asia/Ho_Chi_Minh') as date,
-    category,  -- 'ô tô', 'xe máy', etc.
-    city,
-    COUNT(*) as new_listings,
-    AVG(price) as avg_price
-  FROM `dataset.car_listings`
-  WHERE DATE(created_at, 'Asia/Ho_Chi_Minh') = CURRENT_DATE('Asia/Ho_Chi_Minh') - 1
-  GROUP BY date, category, city
-),
-daily_leads AS (
-  SELECT
-    DATE(timestamp, 'Asia/Ho_Chi_Minh') as date,
-    COUNT(*) as total_leads,
-    COUNTIF(event_name = 'phone_click') as phone_clicks,
-    COUNTIF(event_name = 'form_submit') as form_submits
-  FROM `dataset.events`
-  WHERE DATE(timestamp, 'Asia/Ho_Chi_Minh') = CURRENT_DATE('Asia/Ho_Chi_Minh') - 1
-  GROUP BY date
-)
-SELECT
-  l.*,
-  d.total_leads,
-  d.phone_clicks,
-  d.form_submits
-FROM daily_listings l
-LEFT JOIN daily_leads d USING (date);
-```
-
----
-
-## Integration with Cloud Composer (Advanced)
-
+## When a scheduled query is the wrong tool
+- **Dependencies between steps, tests, versioned SQL** → Dataform (SQL workflows with `ref()` dependencies, assertions, incremental tables, Git integration).
+- **Cross-system orchestration** (wait for a file, call an API, then query) → Cloud Composer / Airflow. Use `BigQueryInsertJobOperator` with standard SQL:
 ```python
-# Airflow DAG for complex workflows
 from airflow import DAG
 from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
-from datetime import datetime, timedelta
+import pendulum
 
-default_args = {
-    'owner': 'data-team',
-    'retries': 3,
-    'retry_delay': timedelta(minutes=5),
-}
-
-with DAG(
-    'bigquery_etl',
-    default_args=default_args,
-    schedule_interval='0 2 * * *',  # 2am daily
-    start_date=datetime(2024, 1, 1),
-    catchup=False
-) as dag:
-    
-    # Step 1: Load data
-    load_task = BigQueryInsertJobOperator(
-        task_id='load_events',
-        configuration={
-            'query': {
-                'query': 'SELECT ... FROM ...',
-                'destinationTable': {
-                    'projectId': 'project',
-                    'datasetId': 'dataset',
-                    'tableId': 'events'
-                },
-                'writeDisposition': 'WRITE_APPEND'
-            }
-        }
+with DAG("daily_stats", schedule="0 2 * * *", start_date=pendulum.datetime(2026, 1, 1, tz="UTC"), catchup=False) as dag:
+    BigQueryInsertJobOperator(
+        task_id="merge_daily_stats",
+        configuration={"query": {"query": "{% include 'sql/daily_stats_merge.sql' %}", "useLegacySql": False}},
+        location="US",
     )
-    
-    # Step 2: Aggregate
-    aggregate_task = BigQueryInsertJobOperator(
-        task_id='aggregate_daily',
-        configuration={...}
-    )
-    
-    # Step 3: Export
-    export_task = BigQueryInsertJobOperator(
-        task_id='export_results',
-        configuration={...}
-    )
-    
-    load_task >> aggregate_task >> export_task
 ```
-
----
-
-## Best Practices
-
-1. **Use parameterized queries** for date ranges
-2. **Always include date filter** to limit data scanned
-3. **Write to partitioned tables** for efficient storage
-4. **Monitor job failures** with alerting
-5. **Test with dry run** before scheduling
-6. **Use WRITE_APPEND** for incremental data
-7. **Set table expiration** for temp tables
-
----
-
-## Cost Optimization
-
-```sql
--- Use clustering for frequently filtered columns
-CREATE OR REPLACE TABLE `dataset.daily_stats`
-PARTITION BY date
-CLUSTER BY tenant_id, category
-AS SELECT ...;
-
--- Scheduled query automatically benefits from clustering
-SELECT *
-FROM `dataset.daily_stats`
-WHERE date = CURRENT_DATE() - 1
-  AND tenant_id = 'abc123';  -- Cluster pruning applied
-```
-
----
-
-## Quick Reference
-
-| Frequency | Schedule String | Use Case |
-|-----------|----------------|----------|
-| Every hour | `every hour` | Real-time dashboards |
-| Every 4 hours | `every 4 hours` | Periodic updates |
-| Daily 2am | `every day 02:00` | Daily ETL |
-| Weekdays 9am | `every weekday 09:00` | Business reports |
-| Weekly Mon 8am | `every monday 08:00` | Weekly summaries |
-| Monthly 1st | `1 of month 00:00` | Monthly reports |
-
-## Version
-
-- **Version:** 1.0.0
-- **Last Updated:** 2024-02-09
+  (`schedule`, not the deprecated `schedule_interval`; set `useLegacySql: False` — the API defaults to legacy SQL.)
+- **Near-real-time** (seconds) → continuous queries or streaming pipelines, not schedules.
