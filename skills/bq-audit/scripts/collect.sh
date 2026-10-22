@@ -93,25 +93,27 @@ fi
 echo "Project: $PROJECT   Region: $REGION ($REGION_Q)   Window: $DAYS days   Per-query cap: ${MAX_GB} GiB"
 echo
 TOTAL=0
-declare -A STATUS
+STATUS_FILE="$(mktemp)"; trap 'rm -f "$STATUS_FILE"' EXIT
+set_status() { printf '%s\t%s\n' "$1" "$2" >> "$STATUS_FILE"; }
+get_status() { awk -F'\t' -v k="$1" '$1==k {v=$2} END {print v}' "$STATUS_FILE"; }
 for name in "${COLLECTORS[@]}"; do
   sql="$(render "$SQL_DIR/$name.sql")"
   assert_read_only "$sql" "$name"
   est="$(dry_run_bytes "$sql")"
   if [[ "$est" == ERR:* ]]; then
     printf "  %-20s SKIP  %s\n" "$name" "${est#ERR:}"
-    STATUS[$name]="skipped: ${est#ERR:}"
+    set_status "$name" "skipped: ${est#ERR:}"
     continue
   fi
   TOTAL=$(( TOTAL + est ))
   if [[ "$MODE" == plan ]]; then
     printf "  %-20s %s\n" "$name" "$(human "$est")"
-    STATUS[$name]="planned"
+    set_status "$name" "planned"
     continue
   fi
   if (( est > MAX_BYTES )); then
     printf "  %-20s SKIP  would bill %s, above --max-gb\n" "$name" "$(human "$est")"
-    STATUS[$name]="skipped: above cap ($est bytes)"
+    set_status "$name" "skipped: above cap ($est bytes)"
     continue
   fi
   if "${BQ[@]}" --format=json query --use_legacy_sql=false --max_rows=10000 \
@@ -119,10 +121,10 @@ for name in "${COLLECTORS[@]}"; do
        "$sql" > "$OUT/raw/$name.json" 2> "$OUT/raw/$name.err"; then
     rm -f "$OUT/raw/$name.err"
     printf "  %-20s ok    %s\n" "$name" "$(human "$est")"
-    STATUS[$name]="ok"
+    set_status "$name" "ok"
   else
     printf "  %-20s FAIL  %s\n" "$name" "$(head -c 200 "$OUT/raw/$name.err" | tr '\n' ' ')"
-    STATUS[$name]="failed"
+    set_status "$name" "failed"
   fi
 done
 echo
@@ -147,32 +149,33 @@ except Exception: pass' "$OUT/raw/datasets.json")"
     fi
   done
   echo "]"
-} > "$OUT/raw/dataset_acl.json" && STATUS[dataset_acl]="ok"
-printf "  %-20s %s\n" dataset_acl "${STATUS[dataset_acl]:-failed}"
+} > "$OUT/raw/dataset_acl.json" && set_status "dataset_acl" "ok"
+printf "  %-20s %s\n" dataset_acl "$(s=$(get_status dataset_acl); echo "${s:-failed}")"
 
 if command -v gcloud >/dev/null && gcloud projects get-iam-policy "$PROJECT" --format=json > "$OUT/raw/project_iam.json" 2> "$OUT/raw/project_iam.err"; then
-  rm -f "$OUT/raw/project_iam.err"; STATUS[project_iam]="ok"
+  rm -f "$OUT/raw/project_iam.err"; set_status "project_iam" "ok"
 else
-  rm -f "$OUT/raw/project_iam.json"; STATUS[project_iam]="skipped: no permission or gcloud missing"
+  rm -f "$OUT/raw/project_iam.json"; set_status "project_iam" "skipped: no permission or gcloud missing"
 fi
-printf "  %-20s %s\n" project_iam "${STATUS[project_iam]}"
+printf "  %-20s %s\n" project_iam "$(get_status project_iam)"
 
 if "${BQ[@]}" --format=json ls --transfer_config --transfer_location="$(echo "$REGION" | tr 'A-Z' 'a-z')" > "$OUT/raw/transfer_configs.json" 2> "$OUT/raw/transfer_configs.err"; then
-  rm -f "$OUT/raw/transfer_configs.err"; STATUS[transfer_configs]="ok"
+  rm -f "$OUT/raw/transfer_configs.err"; set_status "transfer_configs" "ok"
 else
-  rm -f "$OUT/raw/transfer_configs.json"; STATUS[transfer_configs]="skipped: Data Transfer API disabled or no permission"
+  rm -f "$OUT/raw/transfer_configs.json"; set_status "transfer_configs" "skipped: Data Transfer API disabled or no permission"
 fi
-printf "  %-20s %s\n" transfer_configs "${STATUS[transfer_configs]}"
+printf "  %-20s %s\n" transfer_configs "$(get_status transfer_configs)"
 
 # Manifest for the analyzer.
 {
   printf '{"project":"%s","region":"%s","days":%s,"collected_at":"%s","collectors":{' \
     "$PROJECT" "$REGION" "$DAYS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  sep=""
-  for k in "${!STATUS[@]}"; do
-    printf '%s"%s":%s' "$sep" "$k" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${STATUS[$k]}")"
-    sep=","
-  done
+  python3 -c 'import json,sys
+d={}
+for line in open(sys.argv[1], encoding="utf-8"):
+    k, _, v = line.rstrip("\n").partition("\t")
+    d[k] = v
+sys.stdout.write(json.dumps(d)[1:-1])' "$STATUS_FILE"
   printf '}}\n'
 } > "$OUT/manifest.json"
 echo

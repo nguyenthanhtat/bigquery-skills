@@ -4,7 +4,7 @@
 
 **Audit, optimize and operate Google BigQuery from your terminal: read-only by default, cost-aware by design.**
 
-[![Version](https://img.shields.io/badge/version-3.2.0-blue)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-3.2.1-blue)](.claude-plugin/plugin.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](https://code.claude.com/docs/en/plugins)
 [![Evals](https://img.shields.io/badge/evals-21%20scenarios-brightgreen)](#quality-and-evals)
@@ -45,7 +45,12 @@ Most BigQuery problems repeat from project to project: a full scan of an unparti
 
 Restart Claude Code to load it.
 
-**2. Connect to BigQuery** with the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud` and `bq`):
+**2. Connect to BigQuery.** You need:
+
+- the [Google Cloud CLI](https://cloud.google.com/sdk/docs/install) (`gcloud` and `bq`)
+- `python3` and `bash`. Both come with macOS and Linux. On Windows, run Claude Code with Git Bash or WSL.
+
+Then log in:
 
 ```bash
 gcloud auth login

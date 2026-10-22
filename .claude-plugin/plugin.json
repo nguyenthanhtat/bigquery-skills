@@ -1,6 +1,6 @@
 {
   "name": "bigquery-skills",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "description": "Read-only BigQuery health audit (cost, performance, schema, security, reliability) with scored findings and fixes, plus BigQuery how-to skills",
   "author": {
     "name": "Nguyen Thanh Tat",
