@@ -10,6 +10,7 @@ Audits one GCP project in one region. Three stages: **collect** (read-only SQL o
 Paths below are relative to this skill's base directory. Work in the user's current directory; the audit writes `./bq-audit-<project>-<date>/`.
 
 ## Ground rules — never break these
+0. Run the scripts yourself with Bash; don't delegate preflight, plan or collect to another agent. If Bash isn't available, give the user the exact commands to run and stop.
 1. **Read-only.** Only `scripts/collect.sh` touches BigQuery during the audit. Do not run any other `bq query`, DDL, DML, `bq rm/mk/update/cp`, or IAM change — even if it would "just check something". Fixes go in the report; the user applies them.
 2. **The audit costs money.** Always run `plan` first, show the estimate, and get a yes before `run`.
 3. **Never invent numbers.** Every figure in the report comes from `analysis/*.json` or the analyst output.

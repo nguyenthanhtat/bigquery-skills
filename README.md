@@ -4,10 +4,10 @@
 
 **Audit, optimize and operate Google BigQuery from your terminal: read-only by default, cost-aware by design.**
 
-[![Version](https://img.shields.io/badge/version-3.0.0-blue)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-3.1.0-blue)](.claude-plugin/plugin.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](https://code.claude.com/docs/en/plugins)
-[![Evals](https://img.shields.io/badge/evals-17%2F18%20passing-brightgreen)](#quality-and-evals)
+[![Evals](https://img.shields.io/badge/evals-20%20scenarios-brightgreen)](#quality-and-evals)
 
 </div>
 
@@ -188,7 +188,7 @@ The plugin ships two hooks so new users are never left with half-working command
 
 ## Quality and evals
 
-The skills are tested with [Claude Code plugin evals](https://code.claude.com/docs/en/plugin-evals): 18 scenarios covering routing, technical correctness, safety, project-agnostic answers, the audit flow, and machines that aren't set up yet. Each case runs three times, with and without the plugin.
+The skills are tested with [Claude Code plugin evals](https://code.claude.com/docs/en/plugin-evals): 20 scenarios covering routing, technical correctness, safety, project-agnostic answers, the audit flow, and machines that aren't set up yet. Each case runs three times, with and without the plugin.
 
 | | With plugin | Without plugin |
 |---|---|---|
@@ -216,7 +216,7 @@ skills/
 agents/                bq-audit-analyst.md (reviews one audit area)
 hooks/                 hooks.json · check-bigquery.sh · session-context.sh
 scripts/               bq-preflight.sh (setup check)
-evals/                 18 eval cases + README
+evals/                 20 eval cases + README
 ```
 
 ## Limitations

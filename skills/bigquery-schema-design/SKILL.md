@@ -133,10 +133,11 @@ Takes effect immediately for existing partitions past the limit — confirm the 
 - **`expiration_timestamp` deletes the entire table** at that time — use it only for temp/staging tables, never to trim old rows.
 - Dataset defaults: `default_partition_expiration_days`, `default_table_expiration_days` (scratch datasets).
 
-## Recovery and copies
-- Time travel: query or copy the table as of any point in the window (2–7 days, `max_time_travel_hours`, default 7 days): `SELECT * FROM t FOR SYSTEM_TIME AS OF TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 HOUR)`. A **dropped** table is restored with `bq cp mydataset.t@<epoch_ms> mydataset.t_restored`.
-- Fail-safe: 7 more days after time travel, recoverable only through Google support.
-- Table snapshot (`CREATE SNAPSHOT TABLE ... CLONE t`) = cheap read-only point-in-time copy; table clone (`CREATE TABLE ... CLONE t`) = writable copy billed only for changed data. Use before risky changes.
+## Safety copies before a risky change
+- Table snapshot: `CREATE SNAPSHOT TABLE mydataset.events_snap_20261022 CLONE mydataset.events OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 14 DAY));` — read-only point-in-time copy, billed only for data that later changes in the base table.
+- Table clone: `CREATE TABLE mydataset.events_test CLONE mydataset.events;` — writable copy to rehearse a migration, billed only for changed data.
+- Time travel already covers the last 2–7 days (`max_time_travel_hours`); a snapshot keeps the state longer.
+- Something already went wrong (table dropped, rows deleted or overwritten) → use the bigquery-troubleshooting skill's recovery steps.
 
 ## Storage billing
 - Logical (default): bills uncompressed bytes; active vs long-term (table/partition unmodified 90 days → ~50% cheaper). Time travel and fail-safe are free.
