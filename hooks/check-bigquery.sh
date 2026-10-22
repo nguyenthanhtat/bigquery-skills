@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# PreToolUse(Skill) hook: before any skill from this plugin loads, make sure
-# BigQuery is reachable. Not ready → deny the skill and hand Claude the setup
-# steps to give the user. Ready → allow and tell Claude the account/project.
+# PreToolUse(Skill) hook: before any skill from this plugin loads, check that
+# BigQuery is reachable. Ready → allow and tell Claude the account/project.
+# Not ready → bq-audit (needs a live connection) is denied with the setup steps;
+# how-to skills still load so Claude can answer, but are told not to run
+# commands and to give the user the setup steps.
 # BQ_SKILLS_PREFLIGHT / EVAL_BQ_PREFLIGHT: off = skip, simulate-fail = act as if not set up (tests).
 set -uo pipefail
 input="$(cat)"
@@ -36,6 +38,17 @@ if d.get("ok"):
 else:
     failed = "; ".join(f"{c['name']}: {c['detail']}" for c in d.get("checks", []) if c.get("status") == "fail")
     steps = "\n".join(f"{i}. {s}" for i, s in enumerate(d.get("fix", []), 1))
+    needs_connection = skill.split(":")[-1] == "bq-audit"
+if not d.get("ok") and not needs_connection:
+    out = {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+        "additionalContext": (
+            f"BigQuery is not set up on this machine ({failed or 'unknown problem'}). Answer the user's question "
+            "from the skill, but do not run bq/gcloud commands; present SQL and commands for them to run later. "
+            "At the end, tell the user in their language that to run things against their project they need to:\n"
+            f"{steps}\n(interactive logins can be run with `! gcloud auth login`).")}}
+elif not d.get("ok"):
     out = {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",

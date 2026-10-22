@@ -4,10 +4,10 @@
 
 **Audit, optimize and operate Google BigQuery from your terminal: read-only by default, cost-aware by design.**
 
-[![Version](https://img.shields.io/badge/version-3.1.0-blue)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-3.2.0-blue)](.claude-plugin/plugin.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](https://code.claude.com/docs/en/plugins)
-[![Evals](https://img.shields.io/badge/evals-20%20scenarios-brightgreen)](#quality-and-evals)
+[![Evals](https://img.shields.io/badge/evals-21%20scenarios-brightgreen)](#quality-and-evals)
 
 </div>
 
@@ -175,7 +175,7 @@ The plugin ships two hooks so new users are never left with half-working command
 | Hook | When | What it does |
 |---|---|---|
 | **Session hint** | Session start (~20 ms, no network) | Tells Claude you work with BigQuery, so *"partition sales.orders"* reaches the right skill even when you don't say "BigQuery" |
-| **Preflight** | Before any skill of this plugin loads | Checks the CLI, login and BigQuery access. **Not ready:** the skill is blocked and Claude walks you through the missing step (install, `gcloud auth login`, enable the API, or which role to ask your admin for). **Ready:** Claude is told your account and default project. Successful checks are cached for 10 minutes |
+| **Preflight** | Before any skill of this plugin loads | Checks the CLI, login and BigQuery access. **Ready:** Claude is told your account and default project. **Not ready:** how-to skills still answer, without running commands, and end with the missing setup step (install, `gcloud auth login`, enable the API, or which role to ask your admin for). `bq-audit` needs a live connection, so it stops until setup passes. Successful checks are cached for 10 minutes |
 
 ## Configuration
 
@@ -188,7 +188,7 @@ The plugin ships two hooks so new users are never left with half-working command
 
 ## Quality and evals
 
-The skills are tested with [Claude Code plugin evals](https://code.claude.com/docs/en/plugin-evals): 20 scenarios covering routing, technical correctness, safety, project-agnostic answers, the audit flow, and machines that aren't set up yet. Each case runs three times, with and without the plugin.
+The skills are tested with [Claude Code plugin evals](https://code.claude.com/docs/en/plugin-evals): 21 scenarios covering routing, technical correctness, safety, project-agnostic answers, the audit flow, and machines that aren't set up yet. Each case runs three times, with and without the plugin.
 
 | | With plugin | Without plugin |
 |---|---|---|
@@ -216,7 +216,7 @@ skills/
 agents/                bq-audit-analyst.md (reviews one audit area)
 hooks/                 hooks.json · check-bigquery.sh · session-context.sh
 scripts/               bq-preflight.sh (setup check)
-evals/                 20 eval cases + README
+evals/                 21 eval cases + README
 ```
 
 ## Limitations
